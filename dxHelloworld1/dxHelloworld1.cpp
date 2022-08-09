@@ -16,6 +16,9 @@
 #pragma comment (lib, "d3d11.lib")
 #pragma comment (lib, "openvr_api.lib")
 
+#include <Varjo.h>
+#pragma comment (lib, "varjolib.lib")
+
 #define MAX_LOADSTRING 100
 //#define VR_DISABLED
 
@@ -82,7 +85,7 @@ bool m_bShowCubes;
 std::string m_strPoseClasses;                            // what classes we saw poses for this frame
 char m_rDevClassChar[vr::k_unMaxTrackedDeviceCount];   // for each device, a character representing its class
 
-
+varjo_Session* vjSession = nullptr;
 
 namespace Memory
 {
@@ -124,6 +127,43 @@ INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 bool init(HWND hWnd);
 void render_frame(void);
 void clean(void);
+
+template <typename TMethod>
+void DetourDllAttach(const char* dll, const char* target, TMethod hooked, TMethod& original) {
+	if (original) {
+		// Already hooked.
+		return;
+	}
+
+	HMODULE handle;
+	assert(GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_PIN, dll, &handle));
+
+	DetourTransactionBegin();
+	DetourUpdateThread(GetCurrentThread());
+
+	original = (TMethod)GetProcAddress(handle, target);
+	assert(original);
+	DetourAttach((PVOID*)&original, hooked);
+
+	assert(DetourTransactionCommit() == NO_ERROR);
+}
+
+template <typename TMethod>
+void DetourDllDetach(const char* dll, const char* target, TMethod hooked, TMethod& original) {
+	if (!original) {
+		// Not hooked.
+		return;
+	}
+
+	DetourTransactionBegin();
+	DetourUpdateThread(GetCurrentThread());
+
+	DetourDetach((PVOID*)&original, hooked);
+
+	assert(DetourTransactionCommit() == NO_ERROR);
+
+	original = nullptr;
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -464,6 +504,23 @@ void UpdateHMDMatrixPose()
 	}
 }
 
+decltype(GetCurrentProcessId)* g_original_GetCurrentProcessId = nullptr;
+DWORD WINAPI hooked_GetCurrentProcessId() {
+	// We try to only intercept calls from the Varjo client.
+	HMODULE callerModule;
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		(LPCSTR)_ReturnAddress(),
+		&callerModule)) {
+		HMODULE libVarjo = GetModuleHandleA("VarjoLib.dll");
+		HMODULE libVarjoRuntime = GetModuleHandleA("VarjoRuntime.dll");
+		if (callerModule != libVarjo && callerModule != libVarjoRuntime) {
+			return g_original_GetCurrentProcessId();
+		}
+	}
+
+	return 1234;
+}
+
 // this function initializes D3D and VR
 bool init(HWND hWnd)
 {
@@ -522,6 +579,20 @@ bool init(HWND hWnd)
 	}
 
 #endif
+
+	if (varjo_IsAvailable()) {
+		OutputDebugStringA(fmt::format("Varjo SDK : {}\n", varjo_GetVersionString()).c_str());
+
+		DetourDllAttach(
+			"kernel32.dll", "GetCurrentProcessId", hooked_GetCurrentProcessId, g_original_GetCurrentProcessId);
+
+		vjSession = varjo_SessionInit();
+
+		DetourDllDetach(
+			"kernel32.dll", "GetCurrentProcessId", hooked_GetCurrentProcessId, g_original_GetCurrentProcessId);
+
+		varjo_GazeInit(vjSession);
+	}
 
 	// CREATE DEVICE AND SWAP CHAIN
 	D3D_DRIVER_TYPE driverTypes[] =
@@ -944,6 +1015,12 @@ void render_frame(void)
 {
 
 	bool result;
+
+	if (vjSession) {
+		auto& gaze = varjo_GetGaze(vjSession);
+
+		OutputDebugStringA(fmt::format("Gaze status: {}/{}/{}, ray: {},{},{}\n", gaze.status, gaze.leftStatus, gaze.rightStatus, gaze.gaze.forward[0], gaze.gaze.forward[1], gaze.gaze.forward[2]).c_str());
+	}
 
 	// Render the entire scene to the texture first.
 	result = RenderToTexture();
