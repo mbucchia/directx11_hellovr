@@ -107,6 +107,5 @@
     <None Include="texture.ps">
       <Filter>Resources Files</Filter>
     </None>
-    <None Include="..\openvr\bin\win32\openvr_api.dll" />
   </ItemGroup>
 </Project>
